@@ -53,12 +53,14 @@ jobs:
         run: |
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_FLAGS="-DNOGDI -DNOMINMAX" \
+            -DCMAKE_C_FLAGS="-DNOGDI -DNOMINMAX" \
             -DCMAKE_INSTALL_PREFIX="$PWD/stage" \
             -DINSTALL_UDEV_RULES=OFF \
             -DINSTALL_APPSTREAM_DATA=OFF
 
       - name: Build
-        run: cmake --build build --parallel
+        run: cmake --build build --parallel -- -k 0
 
       - name: Install
         run: cmake --install build
