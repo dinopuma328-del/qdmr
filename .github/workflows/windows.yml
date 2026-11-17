@@ -1,0 +1,120 @@
+name: Windows build
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Upstream ref (tag/branch) of hmatuschek/qdmr to build"
+        default: "v0.15.1"
+  push:
+    paths:
+      - ".github/workflows/windows.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    env:
+      QDMR_REF: ${{ github.event.inputs.ref || 'v0.15.1' }}
+    steps:
+      - name: Checkout upstream sources
+        uses: actions/checkout@v4
+        with:
+          repository: hmatuschek/qdmr
+          ref: ${{ env.QDMR_REF }}
+
+      - name: Set up MSYS2 (UCRT64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            zip
+          pacboy: >-
+            toolchain:p
+            cmake:p
+            ninja:p
+            qt6-base:p
+            qt6-tools:p
+            qt6-serialport:p
+            qt6-positioning:p
+            qt6-multimedia:p
+            qt6-translations:p
+            yaml-cpp:p
+            libusb:p
+            librsvg:p
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$PWD/stage" \
+            -DINSTALL_UDEV_RULES=OFF \
+            -DINSTALL_APPSTREAM_DATA=OFF
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Install
+        run: cmake --install build
+
+      - name: Bundle Qt and runtime DLLs
+        run: |
+          set -e
+          DIST="qdmr-${QDMR_REF#v}-windows-x64"
+          mkdir -p "$DIST"
+          cp -r stage/* "$DIST"/
+          BIN="$DIST/bin"
+          ls -la "$BIN"
+          # The qdmr library (libqdmr.dll) may land in lib/ — keep DLLs next to the exes.
+          find "$DIST" -name '*.dll' -not -path "$BIN/*" -exec cp {} "$BIN"/ \;
+          WDQ=$(command -v windeployqt6 || command -v windeployqt-qt6 || command -v windeployqt)
+          echo "Using $WDQ"
+          "$WDQ" "$BIN/qdmr.exe"
+          # Copy every non-system DLL that the binaries, Qt plugins and DLLs depend on.
+          for i in 1 2 3 4; do
+            find "$BIN" \( -name '*.exe' -o -name '*.dll' \) -print0 \
+              | xargs -0 ldd 2>/dev/null \
+              | awk '{print $3}' | grep -i '^/ucrt64/' | sort -u \
+              | while read -r dll; do
+                  [ -f "$BIN/$(basename "$dll")" ] || cp -v "$dll" "$BIN"/
+                done
+          done
+          cp LICENSE "$DIST"/LICENSE.txt
+          cat > "$DIST/README-WINDOWS.txt" <<'EOF'
+          qdmr - unofficial Windows build (MSYS2 / UCRT64) of the upstream sources
+          https://github.com/hmatuschek/qdmr
+
+          Start bin\qdmr.exe (GUI) or bin\dmrconf.exe (command line).
+
+          Radios that talk over USB-serial (AnyTone, OpenGD77, ...) normally show up
+          as a COM port and work out of the box. Radios accessed via raw USB/libusb
+          (e.g. Radioddity GD-77/TYT MD-UV380 family in programming mode) may need
+          the WinUSB driver, installable with Zadig (https://zadig.akeo.ie/).
+          EOF
+          sed -i 's/^          //' "$DIST/README-WINDOWS.txt"
+          zip -r9 "$DIST.zip" "$DIST"
+          echo "DIST=$DIST" >> "$GITHUB_ENV"
+
+      - name: Smoke test dmrconf
+        run: |
+          "$DIST/bin/dmrconf.exe" --version || "$DIST/bin/dmrconf.exe" --help | head -5
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.DIST }}
+          path: ${{ env.DIST }}.zip
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: windows-${{ env.QDMR_REF }}
+          name: qdmr ${{ env.QDMR_REF }} – Windows build
+          body: Unofficial Windows x64 build of hmatuschek/qdmr ${{ env.QDMR_REF }} (MSYS2 UCRT64).
+          files: ${{ env.DIST }}.zip
